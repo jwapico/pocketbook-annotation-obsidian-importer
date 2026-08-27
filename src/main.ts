@@ -43,18 +43,37 @@ export default class MyPlugin extends Plugin {
 		return hash;
 	}
 
-	private extractPersistentSection(existingContent: string): string {
-		const persistStartMarker = "<!-- PERSIST START -->";
-		const persistEndMarker = "<!-- PERSIST END -->";
-
-		const startIdx = existingContent.indexOf(persistStartMarker);
-		const endIdx = existingContent.indexOf(persistEndMarker);
-
-		if (startIdx !== -1 && endIdx !== -1 && startIdx < endIdx) {
-			return existingContent.substring(startIdx, endIdx + persistEndMarker.length);
+	private parseMetadata(html_content: string): { title: string; author: string; exported: string } {
+		const $ = cheerio.load(html_content);
+		const metadataDivs: string[] = [];
+		for (const child of $("body").children().toArray()) {
+			if (child.tagName !== "div") break;
+			const cls = $(child).attr("class") || "";
+			const id = $(child).attr("id");
+			if (cls.includes("bookmark") && !id) {
+				metadataDivs.push($(child).text().trim().replace(/\s+/g, " "));
+			} else {
+				break;
+			}
 		}
 
-		return "";
+		const titleLine = metadataDivs[0] || "";
+		const match = /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s*-\s*(.+)$/.exec(titleLine);
+		const exported = match ? match[1]! : "";
+		const title = match ? match[2]!.trim() : "";
+
+		const author = metadataDivs[1] || "";
+
+		return { title, author, exported };
+	}
+
+	private toFrontmatter(metadata: { title: string; author: string; exported: string }): string {
+		const lines: string[] = ["---"];
+		if (metadata.title) lines.push(`title: "${metadata.title.replace(/"/g, '\\"')}"`);
+		if (metadata.author) lines.push(`authors: "${metadata.author.replace(/"/g, '\\"')}"`);
+		if (metadata.exported) lines.push(`exported: ${metadata.exported}`);
+		lines.push("---");
+		return lines.join("\n");
 	}
 
 	private async ensureFolder(folderPath: string): Promise<void> {
@@ -78,13 +97,8 @@ export default class MyPlugin extends Plugin {
 			const imagePath = `${imagesDir}/${imageName}`;
 
 			const buffer = Buffer.from(match[2]!, "base64");
-			const file = this.app.vault.getFileByPath(imagePath);
-			if (file) {
-				await this.app.vault.modify(file, buffer.toString("utf-8"));
-			} else {
-				const arrayBuffer = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
-				await this.app.vault.createBinary(imagePath, arrayBuffer);
-			}
+			const arrayBuffer = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
+			await this.app.vault.adapter.writeBinary(imagePath, arrayBuffer);
 
 			return `![[${imageName}]]`;
 		} catch (error) {
@@ -97,15 +111,8 @@ export default class MyPlugin extends Plugin {
 		try {
 			
 			const $ = cheerio.load(html_content);
-			const bookTitleDiv = $("div").first();
-			const authorDiv = bookTitleDiv.next();
-			const creationDate = bookTitleDiv.text().trim().slice(0, 19);
-			const title = bookTitleDiv.text().trim().slice(22,);
-			
-			let metadataContent = "";
-			metadataContent += "# " + title + "\n";
-			metadataContent += authorDiv.text().trim() + "\n";
-			metadataContent += "Annotation Creation Date: " + creationDate + "\n";
+			const metadata = this.parseMetadata(html_content);
+			const frontmatter = this.toFrontmatter(metadata);
 
 			const imagesDir = this.settings.outputDir ? `${this.settings.outputDir}/images` : "images";
 			await this.ensureFolder(imagesDir);
@@ -155,24 +162,14 @@ export default class MyPlugin extends Plugin {
 			const outputFilepath = (this.settings.outputDir != "") 
 				? `${this.settings.outputDir}/${filename}` 
 				: filename;
+
+			const formattedContent = frontmatter + "\n\n" + highlightContent;
 			
 			const existingFile = this.app.vault.getFileByPath(outputFilepath);
 			if (existingFile) {
-				const existingContent = await this.app.vault.read(existingFile);
-				const persistentContent = this.extractPersistentSection(existingContent);
-				
-				let formattedContent = metadataContent + "\n";
-				if (persistentContent)
-					formattedContent += persistentContent + "\n";
-				formattedContent += highlightContent;
-
 				await this.app.vault.modify(existingFile, formattedContent)
 				new Notice(`Updated note: ${filename}`);
 			} else {
-				let formattedContent = metadataContent + "\n";
-				formattedContent += "<!-- PERSIST START -->\n";
-				formattedContent += "<!-- PERSIST END -->\n\n";
-				formattedContent += highlightContent;
 				await this.app.vault.create(outputFilepath, formattedContent)
 				new Notice(`Created new note: ${filename}`);
 			}
